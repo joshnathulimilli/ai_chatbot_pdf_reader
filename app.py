@@ -1,160 +1,137 @@
 import streamlit as st
-from pypdf import PdfReader
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import FAISS
-from langchain_google_genai import ChatGoogleGenerativeAI
 from dotenv import load_dotenv
+from pypdf import PdfReader
 
-# Load API Key
-load_dotenv()
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_community.vectorstores import FAISS
 
-# Page Config
-st.set_page_config(
-    page_title="AI PDF Assistant",
-    page_icon="🤖",
-    layout="wide"
+from langchain_google_genai import (
+    ChatGoogleGenerativeAI,
+    GoogleGenerativeAIEmbeddings,
 )
 
-# Session State
+
+MAX_UPLOAD_SIZE_MB = 10
+
+
+load_dotenv()
+
+st.set_page_config(
+    page_title="AI PDF Chatbot",
+    page_icon=":page_facing_up:",
+    layout="wide",
+)
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-if "db" not in st.session_state:
-    st.session_state.db = None
+if "vector_db" not in st.session_state:
+    st.session_state.vector_db = None
 
-if "pdf_processed" not in st.session_state:
-    st.session_state.pdf_processed = False
 
-# Sidebar
 with st.sidebar:
-
-    st.title("📄 PDF Assistant")
-
-    st.markdown("---")
-
-    st.subheader("Technology Stack")
-
-    st.write("🤖 Gemini")
-    st.write("🔍 FAISS")
-    st.write("🧠 HuggingFace")
-    st.write("⚡ Streamlit")
+    st.title("AI PDF Chatbot")
 
     st.markdown("---")
 
-    if st.button("🗑 Clear Chat"):
+    st.write("### Chat History")
+    if st.session_state.messages:
+        for index, message in enumerate(st.session_state.messages, start=1):
+            role = "You" if message["role"] == "user" else "Assistant"
+            preview = message["content"].strip().replace("\n", " ")
+            if len(preview) > 80:
+                preview = f"{preview[:77]}..."
+            st.caption(f"{index}. {role}: {preview}")
+    else:
+        st.caption("No messages yet.")
+
+    st.markdown("---")
+
+    if st.button("Clear Chat"):
         st.session_state.messages = []
+        st.session_state.vector_db = None
         st.rerun()
 
-# Main Title
-st.title("🤖 AI PDF Assistant")
-st.caption("Upload a PDF and chat with your document")
 
-# Upload PDF
+st.title("AI PDF Chatbot")
+st.write("Upload a PDF and ask questions.")
+
 uploaded_file = st.file_uploader(
     "Upload PDF",
-    type=["pdf"]
+    type=["pdf"],
 )
 
-# Process PDF
-if uploaded_file and not st.session_state.pdf_processed:
+if uploaded_file is not None and st.session_state.vector_db is None:
+    upload_size_mb = uploaded_file.size / (1024 * 1024)
+    if upload_size_mb > MAX_UPLOAD_SIZE_MB:
+        st.error(f"Please upload a PDF smaller than {MAX_UPLOAD_SIZE_MB} MB.")
+        st.stop()
 
-    with st.spinner("📚 Processing PDF..."):
-
+    with st.spinner("Processing PDF..."):
         reader = PdfReader(uploaded_file)
 
         text = ""
-
         for page in reader.pages:
             text += page.extract_text() or ""
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=500,
-            chunk_overlap=100
-        )
+        if not text.strip():
+            st.error("No readable text was found in this PDF.")
+            st.stop()
 
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=200,
+        )
         chunks = splitter.split_text(text)
 
-        embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2"
+        embeddings = GoogleGenerativeAIEmbeddings(
+            model="models/gemini-embedding-001",
         )
 
-        db = FAISS.from_texts(
+        st.session_state.vector_db = FAISS.from_texts(
             chunks,
-            embeddings
+            embeddings,
         )
 
-        st.session_state.db = db
-        st.session_state.pdf_processed = True
-        st.session_state.total_chunks = len(chunks)
-        st.session_state.total_chars = len(text)
+    st.success("PDF processed successfully!")
 
-    st.success("✅ PDF Processed Successfully!")
 
-# PDF Statistics
-if st.session_state.pdf_processed:
-
-    with st.sidebar:
-
-        st.markdown("---")
-        st.subheader("📊 PDF Statistics")
-
-        st.write(
-            f"Chunks: {st.session_state.total_chunks}"
-        )
-
-        st.write(
-            f"Characters: {st.session_state.total_chars}"
-        )
-
-# Display Previous Messages
 for message in st.session_state.messages:
-
     with st.chat_message(message["role"]):
-        st.write(message["content"])
+        st.markdown(message["content"])
 
-# Chat Input
-if st.session_state.pdf_processed:
 
-    question = st.chat_input(
-        "Ask a question about the PDF..."
-    )
+if st.session_state.vector_db:
+    question = st.chat_input("Ask a question about your PDF...")
 
     if question:
-
-        # User Message
         st.session_state.messages.append(
             {
                 "role": "user",
-                "content": question
+                "content": question,
             }
         )
 
         with st.chat_message("user"):
-            st.write(question)
+            st.markdown(question)
 
-        # Similarity Search
-        docs = st.session_state.db.similarity_search(
+        docs = st.session_state.vector_db.similarity_search(
             question,
-            k=3
+            k=3,
         )
+        context = "\n\n".join(doc.page_content for doc in docs)
 
-        context = "\n\n".join(
-            [doc.page_content for doc in docs]
-        )
-
-        # Gemini
         llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash"
+            model="gemini-2.5-flash",
+            temperature=0.3,
         )
 
         prompt = f"""
 You are an AI PDF Assistant.
 
-Answer ONLY from the provided context.
+Answer ONLY using the context below.
 
-If the answer is not available in the PDF,
-say:
+If the answer is not available in the PDF, reply:
 "I could not find that information in the uploaded PDF."
 
 Context:
@@ -164,22 +141,19 @@ Question:
 {question}
 """
 
-        with st.spinner("🤖 Thinking..."):
-
+        with st.spinner("Thinking..."):
             response = llm.invoke(prompt)
 
-            answer = response.content
+        answer = response.content
 
-        # Assistant Message
         st.session_state.messages.append(
             {
                 "role": "assistant",
-                "content": answer
+                "content": answer,
             }
         )
 
         with st.chat_message("assistant"):
-            st.write(answer)
-
+            st.markdown(answer)
 else:
-    st.info("📄 Upload a PDF to start chatting.")
+    st.info("Upload a PDF to start chatting.")
