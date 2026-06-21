@@ -9,7 +9,7 @@ textColor = "#FAFAFA"
 headless = true
 enableCORS = false
 enableXsrfProtection = false
-maxUploadSize = 10
+maxUploadSize = 25
 
 [browser]
 gatherUsageStats = false
